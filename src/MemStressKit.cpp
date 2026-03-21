@@ -35,9 +35,10 @@ static std::string SelfDir()
     return buf;
 }
 
-static void ShowHelp();                  // forward declaration
-static int  CmdBuild(const char* mode);  // forward declaration
-static void PrintClNotFound();           // forward declaration
+static void ShowHelp();                              // forward declaration
+static int  CmdBuild(const char* mode,
+                     const char* simdOpt = nullptr); // forward declaration
+static void PrintClNotFound();                       // forward declaration
 
 // Run an exe directly (bypasses cmd.exe to avoid special-char interpretation).
 // suppressStdout=true redirects the child's stdout to NUL so compiler banner
@@ -52,7 +53,11 @@ static int RunDirect(const std::string& cmdLine, bool suppressStdout = false)
 
     if (suppressStdout)
     {
-        // Open NUL for writing; mark it inheritable.
+        // Open NUL for writing.
+        // Must be inheritable so cl.exe receives it as its stdout handle,
+        // but we clear the inherit flag immediately after CreateProcess so
+        // grandchild processes (link.exe) do NOT inherit it -- an inherited
+        // NUL handle in link.exe can cause LNK1104 on the output .exe.
         SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
         hNul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE,
                            &sa, OPEN_EXISTING, 0, nullptr);
@@ -66,7 +71,11 @@ static int RunDirect(const std::string& cmdLine, bool suppressStdout = false)
     BOOL ok = CreateProcessA(nullptr, &buf[0], nullptr, nullptr,
                              TRUE, 0, nullptr, nullptr, &si, &pi);
 
-    if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
+    if (hNul != INVALID_HANDLE_VALUE)
+    {
+        SetHandleInformation(hNul, HANDLE_FLAG_INHERIT, 0);
+        CloseHandle(hNul);
+    }
 
     if (!ok)
     {
@@ -323,8 +332,8 @@ static void ShowHelp()
         " -- build and run tool for MemStresser\n"
         "\n"
         AC_SYSKEY "Usage:" AC_RESET "\n"
-        "  memstresskit " AC_ITEM_NUM "build" AC_RESET " " AC_ITEM_TEXT "<mode>" AC_RESET "\n"
-        "  memstresskit " AC_ITEM_NUM "run  " AC_RESET " " AC_ITEM_TEXT "<mode>" AC_RESET " [windbg]\n"
+        "  memstresskit " AC_ITEM_NUM "build" AC_RESET " " AC_ITEM_TEXT "<mode>" AC_RESET " [simd]\n"
+        "  memstresskit " AC_ITEM_NUM "run  " AC_RESET " " AC_ITEM_TEXT "<mode>" AC_RESET " [simd] [windbg]\n"
         "  memstresskit " AC_ITEM_NUM "info " AC_RESET "\n"
         "  memstresskit " AC_ITEM_NUM "help " AC_RESET "  |  "
                          AC_ITEM_NUM "/h" AC_RESET "  |  "
@@ -336,7 +345,13 @@ static void ShowHelp()
         AC_SYSKEY "  mode:" AC_RESET "\n"
         "    " AC_ITEM_NUM "debug  " AC_RESET "  Debug build / run   (VCRT DLL, PDB)  -> " AC_NUM "Debug\\\n" AC_RESET
         "    " AC_ITEM_NUM "release" AC_RESET "  Release build / run (/MT,  no PDB)   -> " AC_NUM "Release\\\n" AC_RESET
-        "    " AC_ITEM_NUM "all    " AC_RESET "  Build both debug and release\n"
+        "    " AC_ITEM_NUM "all    " AC_RESET "  Build debug + all release SIMD variants\n"
+        "\n"
+        AC_SYSKEY "  simd  (release only, omit = Fallback):" AC_RESET "\n"
+        "    " AC_ITEM_NUM "(none) " AC_RESET "  No /arch flag -- scalar fallback      -> " AC_NUM "Release\\\n" AC_RESET
+        "    " AC_ITEM_NUM "avx2   " AC_RESET "  /arch:AVX2                            -> " AC_NUM "Release_AVX2\\\n" AC_RESET
+        "    " AC_ITEM_NUM "avx512 " AC_RESET "  /arch:AVX512                          -> " AC_NUM "Release_AVX512\\\n" AC_RESET
+        "    " AC_ITEM_NUM "avx10  " AC_RESET "  /arch:AVX512 (AVX10.2 runtime detect) -> " AC_NUM "Release_AVX10.2\\\n" AC_RESET
         "\n"
         AC_SYSKEY "  run options:" AC_RESET "\n"
         "    " AC_ITEM_NUM "windbg" AC_RESET "   Launch under WinDbg instead of DummyDebugger\n"
@@ -344,10 +359,14 @@ static void ShowHelp()
         AC_SYSKEY "Examples:" AC_RESET "\n"
         "  memstresskit build debug\n"
         "  memstresskit build release\n"
+        "  memstresskit build release avx2\n"
+        "  memstresskit build release avx512\n"
+        "  memstresskit build release avx10\n"
         "  memstresskit build all\n"
         "  memstresskit run debug\n"
         "  memstresskit run release\n"
-        "  memstresskit run debug windbg\n"
+        "  memstresskit run release avx2\n"
+        "  memstresskit run release avx2 windbg\n"
         "  memstresskit info\n"
         "  memstresskit help\n"
         "\n"
@@ -356,16 +375,47 @@ static void ShowHelp()
 }
 
 // ---------------------------------------------------------------------------
+// SIMD option helpers
+// ---------------------------------------------------------------------------
+
+// Recognised simd tokens for release builds.
+// nullptr = no simd arg supplied (Fallback).
+// Returns false if the token is unrecognised.
+static bool ParseSimdOpt(const char* token,
+                         std::string& archFlag,
+                         std::string& dirSuffix)
+{
+    if (!token || token[0] == '\0')
+    {
+        archFlag  = "";            // no /arch flag -> scalar fallback
+        dirSuffix = "Release";
+        return true;
+    }
+    if (_stricmp(token, "avx2")   == 0) { archFlag = "/arch:AVX2";   dirSuffix = "Release_AVX2";   return true; }
+    if (_stricmp(token, "avx512") == 0) { archFlag = "/arch:AVX512"; dirSuffix = "Release_AVX512"; return true; }
+    if (_stricmp(token, "avx10")  == 0) { archFlag = "/arch:AVX512"; dirSuffix = "Release_AVX10.2"; return true; }
+    return false;
+}
+
+// All release SIMD variants in build-all order.
+static const char* const kAllSimdOpts[] = { nullptr, "avx2", "avx512", "avx10" };
+
+// ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
-static int CmdBuild(const char* mode)
+static int CmdBuild(const char* mode, const char* simdOpt)
 {
-    // 'all' builds both modes sequentially
+    // 'all' builds debug + every release SIMD variant
     if (_stricmp(mode, "all") == 0)
     {
         int r = CmdBuild("debug");
         if (r != 0) return r;
-        return CmdBuild("release");
+        for (const char* s : kAllSimdOpts)
+        {
+            r = CmdBuild("release", s);
+            if (r != 0) return r;
+        }
+        return 0;
     }
 
     const bool isRelease = (_stricmp(mode, "release") == 0);
@@ -379,6 +429,25 @@ static int CmdBuild(const char* mode)
         return 1;
     }
 
+    // simdOpt is only meaningful for release; silently ignore for debug.
+    std::string archFlag, dirSuffix;
+    if (isRelease)
+    {
+        if (!ParseSimdOpt(simdOpt, archFlag, dirSuffix))
+        {
+            std::fprintf(stderr,
+                AC_OOM "[ERROR]" AC_RESET
+                " Unknown simd option: %s  (use avx2, avx512, avx10, or omit)\n", simdOpt);
+            std::fflush(stderr);
+            ShowHelp();
+            return 1;
+        }
+    }
+    else
+    {
+        dirSuffix = "Debug";
+    }
+
     if (FindClExe().empty())
     {
         PrintClNotFound();
@@ -387,13 +456,13 @@ static int CmdBuild(const char* mode)
 
     std::string dir    = SelfDir();
     std::string srcDir = dir + "src\\";
-    std::string outDir = dir + (isRelease ? "Release" : "Debug");
+    std::string outDir = dir + dirSuffix;
 
     CreateDirectoryA(outDir.c_str(), nullptr);
 
     std::string clFlags = isRelease
-        ? "/nologo /EHa /O2 /W4 /std:c++20 /arch:AVX512 /MT /utf-8"
-        : "/nologo /EHa /Zi /Od /W4 /std:c++20 /arch:AVX512 /MDd /utf-8";
+        ? "/nologo /EHa /O2 /W4 /std:c++20 " + archFlag + (archFlag.empty() ? "" : " ") + "/MT /utf-8"
+        : "/nologo /EHa /Zi /Od /W4 /std:c++20 /MDd /utf-8";
     std::string manifestFlag =
         "/MANIFEST:EMBED /MANIFESTINPUT:\"" + srcDir + "app.manifest\"";
     std::string linkFlags = isRelease
@@ -415,8 +484,11 @@ static int CmdBuild(const char* mode)
 
     std::printf(AC_RUNTIME "[Build]" AC_RESET
         "  mode=" AC_NUM "%s" AC_RESET
+        "  simd=" AC_NUM "%s" AC_RESET
         "  out=" AC_ADDR "%s" AC_RESET "\n",
-        mode, outDir.c_str());
+        mode,
+        archFlag.empty() ? "Fallback" : archFlag.c_str() + 6, // strip "/arch:"
+        outDir.c_str());
     std::fflush(stdout);
 
     // --- rc.exe detection ---
@@ -529,7 +601,7 @@ static int CmdBuild(const char* mode)
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
-static int CmdRun(const char* mode, bool useWinDbg)
+static int CmdRun(const char* mode, const char* simdOpt, bool useWinDbg)
 {
     const bool isRelease = (_stricmp(mode, "release") == 0);
     const bool isDebug   = (_stricmp(mode, "debug")   == 0);
@@ -542,8 +614,26 @@ static int CmdRun(const char* mode, bool useWinDbg)
         return 1;
     }
 
+    std::string archFlag, dirSuffix;
+    if (isRelease)
+    {
+        if (!ParseSimdOpt(simdOpt, archFlag, dirSuffix))
+        {
+            std::fprintf(stderr,
+                AC_OOM "[ERROR]" AC_RESET
+                " Unknown simd option: %s  (use avx2, avx512, avx10, or omit)\n", simdOpt);
+            std::fflush(stderr);
+            ShowHelp();
+            return 1;
+        }
+    }
+    else
+    {
+        dirSuffix = "Debug";
+    }
+
     std::string dir      = SelfDir();
-    std::string outDir   = dir + (isRelease ? "Release" : "Debug");
+    std::string outDir   = dir + dirSuffix;
     std::string exeMain  = outDir + "\\MemStresser.exe";
     std::string exeDummy = outDir + "\\DummyDebugger.exe";
 
@@ -563,7 +653,7 @@ static int CmdRun(const char* mode, bool useWinDbg)
         std::printf(AC_WARN "[INFO]" AC_RESET
             " DummyDebugger.exe not found, building...\n");
         std::fflush(stdout);
-        if (CmdBuild(mode) != 0) return 1;
+        if (CmdBuild(mode, simdOpt) != 0) return 1;
     }
 
     // --- WinDbg mode ---
@@ -625,7 +715,10 @@ static int CmdRun(const char* mode, bool useWinDbg)
 
     std::printf(AC_RUNTIME "[Run]" AC_RESET
         " Launching under DummyDebugger"
-        "  " AC_NUM "%s" AC_RESET "\n", mode);
+        "  mode=" AC_NUM "%s" AC_RESET
+        "  simd=" AC_NUM "%s" AC_RESET "\n",
+        mode,
+        archFlag.empty() ? "Fallback" : archFlag.c_str() + 6);
     std::fflush(stdout);
     return StartDetached(exeDummy, "\"" + exeMain + "\"") ? 0 : 1;
 }
@@ -653,7 +746,9 @@ int main(int argc, char* argv[])
             strcmp(argv[2], "/h"    ) == 0 ||
             strcmp(argv[2], "-h"    ) == 0 ||
             strcmp(argv[2], "--help") == 0)  { ShowHelp(); return 0; }
-        return CmdBuild(argv[2]);
+        // argv[3] = optional simd token (nullptr if absent)
+        const char* simdOpt = (argc >= 4) ? argv[3] : nullptr;
+        return CmdBuild(argv[2], simdOpt);
     }
 
     if (_stricmp(argv[1], "info") == 0)
@@ -664,8 +759,20 @@ int main(int argc, char* argv[])
         if (argc < 3 ||
             strcmp(argv[2], "/?") == 0 ||
             strcmp(argv[2], "-?") == 0)    { ShowHelp(); return 0; }
-        bool windbg = (argc >= 4 && _stricmp(argv[3], "windbg") == 0);
-        return CmdRun(argv[2], windbg);
+        // argv[3] = optional simd token; argv[4] = optional "windbg"
+        // But "windbg" may also appear as argv[3] when simd is omitted.
+        const char* simdOpt = nullptr;
+        bool        windbg  = false;
+        if (argc >= 4)
+        {
+            if (_stricmp(argv[3], "windbg") == 0)
+                windbg = true;
+            else
+                simdOpt = argv[3];
+        }
+        if (argc >= 5 && _stricmp(argv[4], "windbg") == 0)
+            windbg = true;
+        return CmdRun(argv[2], simdOpt, windbg);
     }
 
     std::fprintf(stderr,

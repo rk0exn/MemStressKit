@@ -13,6 +13,56 @@
 #include "reporter.h"
 #include "runtime.h"
 
+// ---------------------------------------------------------------------------
+// SIMD compatibility check
+//
+// Compares the /arch flag baked in at compile time against the CPU's
+// runtime capability detected by Simd::Detect().
+//
+// Required runtime level per build:
+//   /arch:AVX512  (AVX512 / AVX10.2 builds) -> Simd::Level::AVX512 or higher
+//   /arch:AVX2    (AVX2 build)               -> Simd::Level::AVX2   or higher
+//   no /arch      (Fallback build)           -> always OK
+//
+// Returns true if the build is runnable on this CPU.
+// ---------------------------------------------------------------------------
+static bool CheckSimdCompat(Simd::Level runtimeLevel)
+{
+#if defined(__AVX512F__)
+    // Built with /arch:AVX512 -- need at least AVX-512F at runtime
+    if (runtimeLevel < Simd::Level::AVX512)
+    {
+        std::fprintf(stderr,
+            AC_OOM "\n[!] This binary was built with /arch:AVX512\n"
+            "    but this CPU only supports: " AC_WARN "%s" AC_OOM "\n"
+            "    Rebuild with a lower SIMD option:\n"
+            "      memstresskit build release avx2\n"
+            "      memstresskit build release\n"
+            AC_RESET "\nPress Enter to exit...",
+            Simd::LevelName());
+        std::fflush(stderr);
+        std::getchar();
+        return false;
+    }
+#elif defined(__AVX2__)
+    // Built with /arch:AVX2 -- need at least AVX2 at runtime
+    if (runtimeLevel < Simd::Level::AVX2)
+    {
+        std::fprintf(stderr,
+            AC_OOM "\n[!] This binary was built with /arch:AVX2\n"
+            "    but this CPU only supports: " AC_WARN "%s" AC_OOM "\n"
+            "    Rebuild with the fallback option:\n"
+            "      memstresskit build release\n"
+            AC_RESET "\nPress Enter to exit...",
+            Simd::LevelName());
+        std::fflush(stderr);
+        std::getchar();
+        return false;
+    }
+#endif
+    return true;
+}
+
 static bool RequireDebugger()
 {
     if (IsDebuggerPresent()) return true;
@@ -62,6 +112,9 @@ int main()
 
     // SIMD capability detection (once at startup)
     const Simd::Level simdLevel = Simd::Detect();
+
+    if (!CheckSimdCompat(simdLevel))
+        return EXIT_FAILURE;
 
     if (!RequireDebugger())
     {
