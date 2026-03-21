@@ -74,6 +74,9 @@ This compiles `memstresskit.exe` from `src\MemStressKit.cpp` using a single `cl.
 ```bat
 memstresskit build debug
 memstresskit build release
+memstresskit build release avx2 # AVX2 でビルド
+memstresskit build release avx512 # AVX512 でビルド
+memstresskit build release avx10 # AVX10.2 でビルド
 memstresskit build all        # both / 両方
 ```
 
@@ -88,6 +91,9 @@ Outputs go to `Debug\` or `Release\` next to `memstresskit.exe`.
 ```bat
 memstresskit run debug              # DummyDebugger でアタッチして実行
 memstresskit run release
+memstresskit build release avx2     # AVX2 で実行
+memstresskit build release avx512   # AVX512 で実行
+memstresskit build release avx10    # AVX10.2 で実行
 memstresskit run debug windbg       # WinDbg でアタッチして実行
 ```
 
